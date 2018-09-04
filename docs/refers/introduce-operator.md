@@ -18,6 +18,95 @@ Operator 用到了k8s中两种重要的概念：Resource和Controller。一个Re
 6. 需要能够滚动升级的能力。
 7. 能通过"Chaos MonKey"测试（模拟随机的Pod、配置、网络失败问题）
 
+### 如何使用Operator
+以官方提供的etcd operator为例
+
+**Install Operator**
+```bash
+# 创建RBAC规则
+$ example/rbac/create_role.sh
+# 安装etcd operator
+$ kubectl create -f example/deployment.yaml
+# 其中的deployment.yaml
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: etcd-operator
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        name: etcd-operator
+    spec:
+      containers:
+      - name: etcd-operator
+        image: quay.io/coreos/etcd-operator:v0.9.2
+        command:
+        - etcd-operator
+        # Uncomment to act for resources in all namespaces. More information in doc/clusterwide.md
+        #- -cluster-wide
+        env:
+        - name: MY_POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+# etcd的operator会自动的创建一个CRD
+$ kubectl get customresourcedefinitions
+NAME                                    KIND
+etcdclusters.etcd.database.coreos.com   CustomResourceDefinition.v1beta1.apiextensions.k8s.io
+```
+**Uninstall Operator**
+
+Operator被设计为即使operator被删除，其resource也可以继续使用。所以要清理环境的化，除了删除operator还要删除相关的resource
+```
+kubectl delete -f example/deployment.yaml
+kubectl delete endpoints etcd-operator
+kubectl delete crd etcdclusters.etcd.database.coreos.com
+kubectl delete clusterrole etcd-operator
+kubectl delete clusterrolebinding etcd-operator
+```
+
+**使用etcd-operator管理etcd集群**
+```bash
+# 创建
+$ kubectl create -f example/example-etcd-cluster.yaml
+$ kubectl get pods
+NAME                            READY     STATUS    RESTARTS   AGE
+example-etcd-cluster-gxkmr9ql7z   1/1       Running   0          1m
+example-etcd-cluster-m6g62x6mwc   1/1       Running   0          1m
+example-etcd-cluster-rqk62l46kw   1/1       Running   0          1m
+
+# 删除
+$ kubectl delete -f example/example-etcd-cluster.yaml
+
+# Resize
+将集群个数从3个改成5个（同样，如果我们不改size，而是改version，那么就相当于进行了版本升级操作，而etcd-operator会很好的处理。
+$ cat example/example-etcd-cluster.yaml
+apiVersion: "etcd.database.coreos.com/v1beta2"
+kind: "EtcdCluster"
+metadata:
+  name: "example-etcd-cluster"
+spec:
+  size: 5
+  version: "3.2.13"
+$ kubectl apply -f example/example-etcd-cluster.yaml
+
+# Failover
+创建集群之后模拟其中一个节点down掉了
+$ kubectl delete pod example-etcd-cluster-cl2gpqsmsw --now
+# etcd operator 会自动的创建一个新的，确保有三个节点
+$ kubectl get pods
+NAME                            READY     STATUS    RESTARTS   AGE
+example-etcd-cluster-gxkmr9ql7z   1/1       Running   0          10m
+example-etcd-cluster-n4h66wtjrg   1/1       Running   0          26s
+example-etcd-cluster-rqk62l46kw   1/1       Running   0          10m
+```
+
 ### Operator Framework
 OperatorFramework可以帮助开发者加快开发一个operator，包含一下几个组件：Operator SDK，Operator lifecycle manager， operator metering
 
