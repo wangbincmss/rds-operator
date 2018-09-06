@@ -241,5 +241,268 @@ password
 ```
 
 ### Subresources
+CR 支持两种subresource——/status和/scale（From 1.11）,分别对应了kubectl status和kubectl scale两个命令的响应。
+
+该特性默认是开启的，可以通过`--feature-gates=CustomResourceSubresources=false`来关闭该特性。
+
+
+**Status subresource**
+当我们使用kubectl get xxx -o yaml 去获取一个资源对象的时候，通过输出就可以看出来，大概分为三部分：metadata、spec、status。spec可以理解为我们期望这个资源达到一个什么状态，status可以理解为这个资源当前是一个什么状态。而/status 这个subresources的支持就可以让我们对CRD的资源进行关于status的操作.
+
+**Scale subresource**
+当scale subresource激活时，/scale就暴露出来了。autoscaling/v1.Scale 成为/scale的实际响应。要enable它，需要再crd中指定三个参数
+- StatusReplicasPath：代表Scale.Status.Replicas
+  - 必须值
+  - 必须在.status之下
+  - 如果在CR的StatusReplicasPath没有value，status的replica值默认时0
+- SpecReplicaPath: 代表Scale.Spec.Replicas
+  - 必须值
+  - 必须在.spec之下
+  - 如果没有value，GET /scale请求时会报错。
+- LabelSelectorPath: 代表Scale.Status.Selector
+  - 可选值
+  - 必须在.status之下
+  - 如果在CR的StatusReplicasPath没有value，值默认时0
+  
+示例：
+```
+  subresources:
+    # status enables the status subresource.
+    status: {}
+    # scale enables the scale subresource.
+    scale:
+      # specReplicasPath defines the JSONPath inside of a custom resource that corresponds to Scale.Spec.Replicas.
+      specReplicasPath: .spec.replicas
+      # statusReplicasPath defines the JSONPath inside of a custom resource that corresponds to Scale.Status.Replicas.
+      statusReplicasPath: .status.replicas
+      # labelSelectorPath defines the JSONPath inside of a custom resource that corresponds to Scale.Status.Selector.
+      labelSelectorPath: .status.labelSelector
+```
 
 ### Catagories
+categories表示的是一组资源，比如默认的一个catagories就是all。可以使用命令`kubectl get all` 获取添加进all的所有资源对象信息。默认的就是。使用：
+```
+...
+categories:
+- all
+```
+
+### 一个综合示例：
+CRD.yaml
+```
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  # name must match the spec fields below, and be in the form: <plural>.<group>
+  name: mysqlclusters.stable.rds.com
+spec:
+  # group name to use for REST API: /apis/<group>/<version>
+  group: stable.rds.com
+  # list of versions supported by this CustomResourceDefinition
+  versions:
+    - name: v1
+      # Each version can be enabled/disabled by Served flag.
+      served: true
+      # One and only one version must be marked as the storage version.
+      storage: true
+    - name: v2alpha1
+      served: true
+      storage: false
+  # either Namespaced or Cluster
+  scope: Namespaced
+  names:
+    # plural name to be used in the URL: /apis/<group>/<version>/<plural>
+    plural: mysqlclusters
+    # singular name to be used as an alias on the CLI and for display
+    singular: mysqlcluster
+    # kind is normally the CamelCased singular type. Your resource manifests use this.
+    kind: MysqlCluster
+    # shortNames allow shorter string to match your resource on the CLI
+    shortNames:
+    - mc
+    categories:
+    - all
+  validation:
+    openAPIV3Schema:
+      properties:
+        spec:
+          properties:
+            password:
+              type: string
+              pattern: '^(\d+|\*)(/\d+)?(\s+(\d+|\*)(/\d+)?){4}$'
+            replicas:
+              type: integer
+              minimum: 1
+              maximum: 10
+  additionalPrinterColumns:
+  - name: Password
+    type: string
+    description: Root password
+    JSONPath: .spec.password
+  - name: Replicas
+    type: integer
+    description: The number of nodes of mysqlcluster.
+    JSONPath: .spec.replicas
+  - name: Age
+    type: date
+    JSONPath: .metadata.creationTimestamp
+  # subresources describes the subresources for custom resources.
+  subresources:
+    # status enables the status subresource.
+    status: {}
+    # scale enables the scale subresource.
+    scale:
+      # specReplicasPath defines the JSONPath inside of a custom resource that corresponds to Scale.Spec.Replicas.
+      specReplicasPath: .spec.replicas
+      # statusReplicasPath defines the JSONPath inside of a custom resource that corresponds to Scale.Status.Replicas.
+      statusReplicasPath: .status.replicas
+      # labelSelectorPath defines the JSONPath inside of a custom resource that corresponds to Scale.Status.Selector.
+      labelSelectorPath: .status.labelSelector
+
+```
+
+CR的示例：
+```
+apiVersion: "stable.rds.com/v1"
+kind: MysqlCluster
+metadata:
+  name: test-mysql-cluster
+spec:
+  password: '* * * * */5'
+  replicas: 3
+```
+kubectl get
+```
+# 使用标准名字，输出的字段就是我们在CRD中定义的 PASSWORD REPLICAS AGE字段
+[root@rdb24 crd]# kubectl get mysqlclusters
+NAME                 PASSWORD      REPLICAS   AGE
+test-mysql-cluster   * * * * */5   3          5m
+
+# 使用短名称
+[root@rdb24 crd]# kubectl get mc
+NAME                 PASSWORD      REPLICAS   AGE
+test-mysql-cluster   * * * * */5   3          5m
+
+# 输出完整内容
+[root@rdb24 crd]# kubectl get mc -o yaml
+apiVersion: v1
+items:
+- apiVersion: stable.rds.com/v1
+  kind: MysqlCluster
+  metadata:
+    creationTimestamp: 2018-09-06T07:16:20Z
+    generation: 1
+    name: test-mysql-cluster
+    namespace: default
+    resourceVersion: "13087253"
+    selfLink: /apis/stable.rds.com/v1/namespaces/default/mysqlclusters/test-mysql-cluster
+    uid: c0ef7319-b1a4-11e8-bbad-384c4fcc6ffe
+  spec:
+    password: '* * * * */5'
+    replicas: 3
+kind: List
+metadata:
+  resourceVersion: ""
+  selfLink: ""
+  
+# 检查是否包含在all的 cagegories中
+[root@rdb24 crd]# kubectl get all
+NAME                 TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+service/kubernetes   ClusterIP   10.200.0.1   <none>        443/TCP   147d
+
+NAME                                             PASSWORD      REPLICAS   AGE
+mysqlcluster.stable.rds.com/test-mysql-cluster   * * * * */5   3          8m
+
+```
+ 检查对应的API 接口 
+ 检查所有的groups 可以看到我们的stable.rds.com已经注册到了apiserver上,包含v1和v2alpa两个版本。
+ ```
+ https://10.254.10.24:6443/apis
+ 
+   {
+      "name": "stable.rds.com",
+      "versions": [
+        {
+          "groupVersion": "stable.rds.com/v1",
+          "version": "v1"
+        },
+        {
+          "groupVersion": "stable.rds.com/v2alpha1",
+          "version": "v2alpha1"
+        }
+      ],
+      "preferredVersion": {
+        "groupVersion": "stable.rds.com/v1",
+        "version": "v1"
+      }
+    },
+
+```
+
+以V1版本为例，检查一下有多少个source。可以看到有三个resource，其中两个是subresource，分别是status和scale
+```
+https://10.254.10.24:6443/apis/stable.rds.com/v1/
+
+{
+  "kind": "APIResourceList",
+  "apiVersion": "v1",
+  "groupVersion": "stable.rds.com/v1",
+  "resources": [
+    {
+      "name": "mysqlclusters",
+      "singularName": "mysqlcluster",
+      "namespaced": true,
+      "kind": "MysqlCluster",
+      "verbs": [
+        "delete",
+        "deletecollection",
+        "get",
+        "list",
+        "patch",
+        "create",
+        "update",
+        "watch"
+      ],
+      "shortNames": [
+        "mc"
+      ],
+      "categories": [
+        "all"
+      ]
+    },
+    {
+      "name": "mysqlclusters/status",
+      "singularName": "",
+      "namespaced": true,
+      "kind": "MysqlCluster",
+      "verbs": [
+        "get",
+        "patch",
+        "update"
+      ]
+    },
+    {
+      "name": "mysqlclusters/scale",
+      "singularName": "",
+      "namespaced": true,
+      "group": "autoscaling",
+      "version": "v1",
+      "kind": "Scale",
+      "verbs": [
+        "get",
+        "patch",
+        "update"
+      ]
+    }
+  ]
+}
+```
+
+资源——mysqlclusters
+```
+{"apiVersion":"stable.rds.com/v1",
+ "items":[{"apiVersion":"stable.rds.com/v1","kind":"MysqlCluster","metadata":{"creationTimestamp":"2018-09-06T07:16:20Z","generation":1,"name":"test-mysql-cluster","namespace":"default","resourceVersion":"13087253","selfLink":"/apis/stable.rds.com/v1/namespaces/default/mysqlclusters/test-mysql-cluster","uid":"c0ef7319-b1a4-11e8-bbad-384c4fcc6ffe"},"spec":{"password":"* * * * */5","replicas":3}}],
+ "kind":"MysqlClusterList",
+ "metadata":{"continue":"","resourceVersion":"13089393","selfLink":"/apis/stable.rds.com/v1/namespaces/default/mysqlclusters"}}
+
+```
